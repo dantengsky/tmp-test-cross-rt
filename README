@@ -1,0 +1,31 @@
+
+
+tmp repo for testing
+
+# start service
+
+`cargo run -r --bin streaming-server`
+
+
+# start client
+
+`cargo run -r --bin streaming-client`
+
+something like this should be printed:
+
+```
+iteration = 0
+.....
+iteration = 999
+main exiting...
+Press any key to quit...
+
+```
+
+before press any key, check if there are established connections:
+
+`netstat -nt | grep 50051 | grep EST`
+
+
+
+
