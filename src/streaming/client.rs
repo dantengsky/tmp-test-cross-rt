@@ -3,90 +3,33 @@ pub mod pb {
 }
 
 use std::time::Duration;
-use tokio_stream::{Stream, StreamExt};
-use tonic::transport::Channel;
+use tokio_stream::StreamExt;
 
 use pb::{echo_client::EchoClient, EchoRequest};
 
-fn echo_requests_iter() -> impl Stream<Item = EchoRequest> {
-    tokio_stream::iter(1..usize::MAX).map(|i| EchoRequest {
-        message: format!("msg {:02}", i),
-    })
-}
-
-async fn streaming_echo(client: &mut EchoClient<Channel>, num: usize) {
-    let stream = client
-        .server_streaming_echo(EchoRequest {
-            message: "foo".into(),
-        })
-        .await
-        .unwrap()
-        .into_inner();
-
-    // stream is infinite - take just 5 elements and then disconnect
-    let mut stream = stream.take(num);
-    while let Some(item) = stream.next().await {
-        println!("\treceived: {}", item.unwrap().message);
-    }
-    // stream is droped here and the disconnect info is send to server
-}
-
-async fn bidirectional_streaming_echo(client: &mut EchoClient<Channel>, num: usize) {
-    let in_stream = echo_requests_iter().take(num);
-
-    let response = client
-        .bidirectional_streaming_echo(in_stream)
-        .await
-        .unwrap();
-
-    let mut resp_stream = response.into_inner();
-
-    while let Some(received) = resp_stream.next().await {
-        let received = received.unwrap();
-        println!("\treceived message: `{}`", received.message);
-    }
-}
-
-async fn bidirectional_streaming_echo_throttle(client: &mut EchoClient<Channel>, dur: Duration) {
-    let in_stream = echo_requests_iter().throttle(dur);
-
-    let response = client
-        .bidirectional_streaming_echo(in_stream)
-        .await
-        .unwrap();
-
-    let mut resp_stream = response.into_inner();
-
-    while let Some(received) = resp_stream.next().await {
-        let received = received.unwrap();
-        println!("\treceived message: `{}`", received.message);
-    }
-}
-
 use tokio::runtime::Runtime;
-async fn test(rt1: &Runtime, rt2: &Runtime) {
+async fn test(simu_rpc_service_rt: &Runtime, simu_global_io_rt: &Runtime) {
     for i in 0..1000 {
-        println!("i = {}", i);
-        //        let client_ft = async { EchoClient::connect("http://[::1]:50051").await.unwrap() };
+        println!("iteration = {}", i);
 
-        // build client from global runtime rt1
-        //        let mut client = rt1.block_on(client_ft);
+        let mut stream = {
+            // create stream from simu_rpc_service_rt
+            let stream_fut = async {
+                let mut client = EchoClient::connect("http://127.0.0.1:50051").await.unwrap();
+                client
+                    .server_streaming_echo(EchoRequest {
+                        message: "foo".into(),
+                    })
+                    .await
+                    .unwrap()
+                    .into_inner()
+            };
 
-        let stream_fut = async {
-            let mut client = EchoClient::connect("http://127.0.0.1:50051").await.unwrap();
-            client
-                .server_streaming_echo(EchoRequest {
-                    message: "foo".into(),
-                })
-                .await
-                .unwrap()
-                .into_inner()
+            simu_rpc_service_rt.spawn(stream_fut).await.unwrap()
         };
 
-        // build stream from global runtime rt2
-        let mut stream = rt1.spawn(stream_fut).await.unwrap();
-
-        //let num = 50;
+        // as  FlightClient::streaming_receiver does, use a bounded (cap = 1) async_channel to receive stream,
+        // and forward it to the receiver
         let (tx, rx) = async_channel::bounded(1);
 
         let echo = async move {
@@ -97,14 +40,14 @@ async fn test(rt1: &Runtime, rt2: &Runtime) {
                 }
                 //println!("\treceived: {}", item.unwrap().message);
             }
+
+            // as FlightClient::streaming_receiver does, drop the stream to close the connection explicitly
             drop(stream);
             tx.close();
         };
 
-        rt2.spawn(echo);
-
-        //let adhoc_rt = Runtime::new().unwrap();
-        // sleep 1s to avoid mess server println functions
+        // run it in the simu_global_io_rt
+        simu_global_io_rt.spawn(echo);
 
         let receiver = async move {
             while let Ok(item) = rx.recv().await {
@@ -115,33 +58,37 @@ async fn test(rt1: &Runtime, rt2: &Runtime) {
             }
         };
 
-        // this will leak
-        //rt1.spawn(receiver);
-        //
-        rt2.spawn(receiver);
+        // scenario 1: run receiver in the simu_rpc_service_rt
+        // run reveiver in the simu_global_io_rt
+        // simu_global_io_rt.spawn(receiver);
 
-        //adhoc_rt.spawn(receiver);
-        //std::thread::spawn(move || {
-        //    std::thread::sleep(std::time::Duration::from_millis(30));
-        //    drop(adhoc_rt);
-        //});
+        // scenario 2: run receiver in an adhoc rt
+        let adhoc_rt = Runtime::new().unwrap();
+        adhoc_rt.spawn(receiver);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            drop(adhoc_rt);
+        });
     }
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let rt1 = Runtime::new().unwrap();
-    let rt2 = Runtime::new().unwrap();
+    let simulated_grpc_service_rt = Runtime::new().unwrap();
+    let simulated_global_io_rt = Runtime::new().unwrap();
     let g = Runtime::new().unwrap();
 
-    g.block_on(test(&rt1, &rt2));
+    g.block_on(test(&simulated_grpc_service_rt, &simulated_global_io_rt));
 
-    eprintln!("main exiting...");
+    println!("main exiting...");
 
-    // read a key press and quit
-    use std::io::{stdin, stdout, Read, Write};
-    let mut stdout = stdout();
-    stdout.write_all(b"Press any key to quit...").unwrap();
-    stdout.flush().unwrap();
-    let _ = stdin().read(&mut [0u8]).unwrap();
+    {
+        // thanks copilot...
+        // read a key press and quit
+        use std::io::{stdin, stdout, Read, Write};
+        let mut stdout = stdout();
+        stdout.write_all(b"Press any key to quit...").unwrap();
+        stdout.flush().unwrap();
+        let _ = stdin().read(&mut [0u8]).unwrap();
+    }
 
     Ok(())
 }
