@@ -1,0 +1,28 @@
+[package]
+name = "cross_rt"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[[bin]]
+name = "streaming-client"
+path = "src/streaming/client.rs"
+
+[[bin]]
+name = "streaming-server"
+path = "src/streaming/server.rs"
+
+
+[dependencies]
+async-channel = "1.8.0"
+h2 = { version = "0.3.18" }
+prost = { version = "0.12.1" }
+tokio = { version = "1.35.0", features = ["full"] }
+tokio-stream = "0.1.11"
+tonic = { version = "0.10.2", features = ["transport", "codegen", "prost", "tls-roots", "tls"] }
+tonic-reflection = { version = "0.10.2" }
+
+[build-dependencies]
+tonic-build = { version = "0.10.2" }
+
